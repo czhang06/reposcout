@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
+
+# Ollama defaults to a 4,096-token context and silently drops anything beyond it, which
+# is smaller than one agent turn with tool results. 12K fits an 8B Q4 model plus its
+# KV cache in 8 GB of VRAM. Override with REPOSCOUT_OLLAMA_NUM_CTX.
+OLLAMA_NUM_CTX = 12_288
 
 
 def get_chat_model(spec: str, max_tokens: int = 4000) -> BaseChatModel:
@@ -17,7 +24,8 @@ def get_chat_model(spec: str, max_tokens: int = 4000) -> BaseChatModel:
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
-        return ChatOllama(model=model, num_predict=max_tokens)
+        num_ctx = int(os.environ.get("REPOSCOUT_OLLAMA_NUM_CTX", OLLAMA_NUM_CTX))
+        return ChatOllama(model=model, num_predict=max_tokens, num_ctx=num_ctx)
     raise ValueError(f"Unknown chat model provider in {spec!r}; use anthropic:<model> or ollama:<model>")
 
 

@@ -8,7 +8,8 @@ from reposcout.chunk import Chunk
 from reposcout.embed import HashingEmbedder
 from reposcout.evals import answers
 from reposcout.evals.answers import (
-    ClaudeCodeJudge, LangChainJudge, Verdict, agreement, make_judge, parse_claude_output, run_answer_eval,
+    ClaudeCodeJudge, LangChainJudge, Verdict, agent_answerer, agreement, make_judge, parse_claude_output,
+    rag_answerer, run_answer_eval,
 )
 from reposcout.ingest.pipeline import index_chunks
 from reposcout.retrieval.retriever import RetrievalConfig, Retriever
@@ -37,9 +38,11 @@ def test_run_answer_eval_aggregates(monkeypatch, tmp_path):
     qs = [{"id": f"q{i}", "question": "How is DagRun state updated?", "gold_files": ["models/dagrun.py"],
            "commit": "c", "date": "2026-01-01"} for i in range(2)]
     llm = FakeListChatModel(responses=["It is set in update_state [1].", "No idea [4]."])
-    r = run_answer_eval(qs, tmp_path, Retriever(emb, store), RetrievalConfig(), llm, "claude-haiku-5-5", judge, k=3)
+    answerer = rag_answerer(Retriever(emb, store), RetrievalConfig(), llm, "claude-haiku-5-5", k=3)
+    r = run_answer_eval(qs, tmp_path, answerer, judge, "rag")
 
-    assert r["n"] == 2 and r["judge"] == "fake"
+    assert r["n"] == 2 and r["judge"] == "fake" and r["config"] == "rag"
+    assert "mean_tool_calls" not in r
     assert r["correct (2)"] == 0.5 and r["mean_correctness"] == 1.5
     assert r["faithful"] == 0.5
     assert r["cited_gold_file"] == 0.5  # the second answer cites [4], which does not exist
@@ -118,3 +121,56 @@ def test_cli_env_drops_host_session_vars(monkeypatch):
     env = ClaudeCodeJudge._env()
     assert "CLAUDE_CODE_ENTRYPOINT" not in env and "ANTHROPIC_API_KEY" not in env
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok" and env["PATH_LIKE_VAR"] == "keep"
+
+
+def test_agent_answerer_in_eval(monkeypatch, tmp_path):
+    from langchain_core.messages import AIMessage
+
+    from reposcout.agent.graph import RepoAgent
+    from tests.test_agent import ScriptedModel, call, toolbox
+
+    monkeypatch.setattr(answers, "reference_for", lambda repo, commit: "ref")
+    model = ScriptedModel(script=[
+        AIMessage("", tool_calls=[call("search_code", {"query": "add task"}, 1)]),
+        AIMessage("Use the add_task method [S1]."),
+    ], seen=[])
+    answerer = agent_answerer(RepoAgent(model, "claude-haiku-5-5"), lambda before_date: toolbox(), tmp_path / "traces")
+    q = {"id": "q1", "question": "How do I add a task?", "gold_files": ["pkg/dag.py"], "commit": "c", "date": None}
+    judge = FakeJudge([Verdict(reasoning="ok", correctness=2, faithful=True, abstained=False)])
+    r = run_answer_eval([q], tmp_path, answerer, judge, "agent")
+    row = r["per_question"][0]
+    assert row["tool_calls"] == 1 and row["stop_reason"] == "answered" and row["cited_gold_file"]
+    assert r["mean_tool_calls"] == 1 and r["hit_budget"] == 0 and r["unverified"] == 0
+    assert "[S1]" in judge.calls[0][2]
+    assert len(list((tmp_path / "traces").glob("*q1.json"))) == 1
+
+
+def test_checkpoint_resumes_after_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(answers, "reference_for", lambda repo, commit: "ref")
+    qs = [{"id": f"q{i}", "question": "?", "gold_files": ["a.py"], "commit": "c"} for i in range(3)]
+    answered = []
+
+    def answerer(q):
+        answered.append(q["id"])
+        return answers.Answered("ans [S1]", "src", ["a.py"], 0, 0.001, 10.0)
+
+    ok = Verdict(reasoning="ok", correctness=2, faithful=True, abstained=False)
+
+    class FlakyJudge(FakeJudge):
+        def grade(self, *a):
+            if len(self.calls) == 1:
+                self.calls.append(a)
+                raise RuntimeError("usage limit reached")
+            return super().grade(*a)
+
+    ckpt = tmp_path / "ckpt.jsonl"
+    with pytest.raises(RuntimeError, match="usage limit"):
+        run_answer_eval(qs, tmp_path, answerer, FlakyJudge([ok] * 3), "x", ckpt)
+    assert len(ckpt.read_text().splitlines()) == 1  # q0 saved before the failure
+
+    answered.clear()
+    r = run_answer_eval(qs, tmp_path, answerer, FakeJudge([ok] * 3), "x", ckpt)
+    assert answered == ["q1", "q2"]  # q0 was not answered or graded again
+    assert r["n"] == 3 and len(ckpt.read_text().splitlines()) == 3
+    # a smaller question set only reports its own rows
+    assert run_answer_eval(qs[:2], tmp_path, answerer, FakeJudge([]), "x", ckpt)["n"] == 2

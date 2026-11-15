@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # "memory" stores vectors in a local .npz file; "pg" uses Postgres + pgvector.
     store: str = "memory"
     index_dir: Path = Path("data/index")
+    repo_dir: Path = Path("data/airflow")  # indexed checkout, for the agent's read_file tool
     database_url: str = "postgresql+psycopg://reposcout:reposcout@localhost:5432/reposcout"
 
     # Small and fast on CPU. Switch to BAAI/bge-m3 once running on the GPU.
@@ -39,6 +40,11 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    # Provider SDKs read their keys (e.g. ANTHROPIC_API_KEY) from the process
+    # environment, not from Settings, so load .env into it. Real env vars win.
+    from dotenv import load_dotenv
+
+    load_dotenv(".env", override=False)
     return Settings()
 
 

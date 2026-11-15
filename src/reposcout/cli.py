@@ -98,6 +98,35 @@ def ask(question: str, k: int = typer.Option(None)):
     )
 
 
+@app.command()
+def agent(
+    question: str,
+    repo: Path = typer.Option(Path("data/airflow"), exists=True, file_okay=False, help="Indexed checkout, for read_file"),
+    trace: bool = typer.Option(False, help="Print each step and save the trace to results/traces"),
+):
+    """Answer with the LangGraph agent: it searches and reads the code, then cites verified sources."""
+    from reposcout.agent.run import ToolboxFactory, make_agent, save_trace
+
+    s, embedder, store = _setup()
+    r = make_agent(s).run(question, ToolboxFactory(s, embedder, store, repo)())
+    if trace:
+        for e in r.trace:
+            detail = {k: v for k, v in e.items() if k not in ("t_ms", "node")}
+            typer.echo(f"  {e['t_ms']:>8.0f} ms  {e['node']:<8} {detail}")
+        typer.echo(f"  trace saved to {save_trace(r, Path('results/traces'))}\n")
+    typer.echo(r.answer)
+    typer.echo("\nSources:")
+    for c in r.citations:
+        typer.echo(f"  [{c['sid']}] {c['location']}  {c['url'] or ''}")
+    if r.issues:
+        typer.echo(f"\nUnresolved citation issues: {r.issues}")
+    typer.echo(
+        f"\n{r.rounds} tool rounds, {r.tool_calls} tool calls ({', '.join(r.tools_used) or 'none'}); "
+        f"{r.input_tokens} in / {r.output_tokens} out tokens, ${r.cost_usd:.5f}, {r.latency_ms / 1000:.1f} s; "
+        f"stop: {r.stop_reason}"
+    )
+
+
 @app.command("eval-retrieval")
 def eval_retrieval(
     dataset: Path = typer.Option(Path("evals/airflow_v1.jsonl"), exists=True),
@@ -147,6 +176,7 @@ def eval_answers(
     dataset: Path = typer.Option(Path("evals/airflow_v1.jsonl"), exists=True),
     limit: int = typer.Option(None, help="Only the first N questions (cheap smoke run)"),
     judge_model: str = typer.Option(None, "--judge", help="claude-code:<model>, anthropic:<model> or ollama:<model>"),
+    mode: str = typer.Option("agent", help="agent (LangGraph tool loop) or rag (single-shot baseline)"),
     out: Path = typer.Option(Path("results")),
 ):
     """Answer each eval question, then grade it with an LLM judge.
@@ -156,22 +186,70 @@ def eval_answers(
     """
     import json
 
-    from reposcout.evals.answers import make_judge, run_answer_eval, save
+    from reposcout.evals.answers import agent_answerer, make_judge, rag_answerer, run_answer_eval, save
     from reposcout.llm import get_chat_model, model_name
-    from reposcout.retrieval.retriever import build_retriever
 
     s, embedder, store = _setup()
-    retriever, cfg = build_retriever(s, embedder, store)
     judge = make_judge(judge_model or s.judge, s.claude_bin)
     questions = [json.loads(l) for l in dataset.read_text(encoding="utf-8").splitlines() if l.strip()][:limit]
-    result = run_answer_eval(
-        questions, repo, retriever, cfg,
-        get_chat_model(s.chat_model, s.max_answer_tokens), model_name(s.chat_model),
-        judge, s.top_k,
-    )
-    path = save(result, out, {"dataset": str(dataset), "embedder": s.embed_model, "judge": judge.name})
+    if mode == "rag":
+        from reposcout.retrieval.retriever import build_retriever
+
+        retriever, cfg = build_retriever(s, embedder, store)
+        answerer = rag_answerer(retriever, cfg, get_chat_model(s.chat_model, s.max_answer_tokens),
+                                model_name(s.chat_model), s.top_k)
+        label = f"rag ({cfg.label}) -> {model_name(s.chat_model)}"
+    elif mode == "agent":
+        from reposcout.agent.run import ToolboxFactory, make_agent
+
+        answerer = agent_answerer(make_agent(s), ToolboxFactory(s, embedder, store, repo), out / "traces")
+        label = f"agent -> {model_name(s.chat_model)}"
+    else:
+        raise typer.BadParameter("mode must be 'agent' or 'rag'")
+    # One checkpoint per (mode, answer model, judge, dataset): re-running resumes it.
+    slug = "-".join(x.replace(":", "_").replace("/", "_") for x in (mode, s.chat_model, judge.name, dataset.stem))
+    checkpoint = out / "checkpoints" / f"{slug}.jsonl"
+    result = run_answer_eval(questions, repo, answerer, judge, label, checkpoint)
+    path = save(result, out, {"dataset": str(dataset), "embedder": s.embed_model, "judge": judge.name, "mode": mode,
+                              "checkpoint": str(checkpoint)})
     summary = {k: v for k, v in result.items() if k != "per_question"}
     typer.echo(json.dumps(summary, indent=1) + f"\nSaved {path}")
+
+
+@app.command("compare-answers")
+def compare_answers(
+    baseline: Path = typer.Argument(..., exists=True, help="answers-*.json for the baseline (e.g. rag)"),
+    candidate: Path = typer.Argument(..., exists=True, help="answers-*.json to compare (e.g. agent)"),
+):
+    """Paired bootstrap over the questions both runs answered: which differences are real?"""
+    import json
+
+    from reposcout.evals.compare import paired_bootstrap
+
+    def rows(p: Path) -> tuple[str, dict]:
+        r = json.loads(p.read_text(encoding="utf-8"))["result"]
+        return r["config"], {q["id"]: q for q in r["per_question"]}
+
+    (name_a, a), (name_b, b) = rows(baseline), rows(candidate)
+    ids = sorted(a.keys() & b.keys())
+    typer.echo(f"{name_b}  vs  {name_a}   ({len(ids)} paired questions)\n")
+    metrics = {
+        "fully correct (2)": lambda q: float(q["correctness"] == 2),
+        "mean correctness (0-2)": lambda q: float(q["correctness"]),
+        "faithful": lambda q: float(q["faithful"]),
+        "cited a gold file": lambda q: float(q["cited_gold_file"]),
+        "abstained": lambda q: float(q["abstained"]),
+    }
+    typer.echo(f"| Metric | {name_a[:28]} | {name_b[:28]} | Difference | 95% CI | Wins/losses |")
+    typer.echo("|---|---|---|---|---|---|")
+    for label, f in metrics.items():
+        xa, xb = [f(a[i]) for i in ids], [f(b[i]) for i in ids]
+        r = paired_bootstrap(xa, xb)
+        lo, hi = r["ci95"]
+        mark = " *" if lo > 0 or hi < 0 else ""
+        typer.echo(f"| {label} | {sum(xa) / len(ids):.2f} | {sum(xb) / len(ids):.2f} | {r['mean_diff']:+.2f}{mark} "
+                   f"| [{lo:+.2f}, {hi:+.2f}] | {r['wins']}/{r['losses']} |")
+    typer.echo("\n* = 95% interval excludes 0")
 
 
 if __name__ == "__main__":

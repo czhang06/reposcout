@@ -23,7 +23,8 @@ import statistics
 import subprocess
 import tempfile
 import time
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -193,39 +194,93 @@ def make_judge(spec: str, claude_bin: str = "claude") -> Judge:
     return LangChainJudge(spec)
 
 
-def run_answer_eval(
-    questions: list[dict],
-    repo: Path,
-    retriever: Retriever,
-    cfg: RetrievalConfig,
-    llm: BaseChatModel,
-    llm_model: str,
-    judge: Judge,
-    k: int = 8,
-) -> dict:
-    rows = []
-    for q in questions:
+@dataclass
+class Answered:
+    """What any answering system returns for one eval question."""
+
+    answer: str
+    sources_text: str  # exactly what the system saw, for the faithfulness grade
+    cited_paths: list[str]
+    invalid_citations: int
+    cost_usd: float
+    latency_ms: float
+    extra: dict = field(default_factory=dict)  # e.g. rounds, tool calls for the agent
+
+
+Answerer = Callable[[dict], Answered]
+
+
+def rag_answerer(retriever: Retriever, cfg: RetrievalConfig, llm: BaseChatModel, llm_model: str, k: int = 8) -> Answerer:
+    """The single-shot RAG baseline: retrieve top-k once, answer once."""
+
+    def answer(q: dict) -> Answered:
         a = answer_question(q["question"], retriever, llm, llm_model, k, cfg=replace(cfg, before_date=q.get("date")))
-        verdict, judge_cost = judge.grade(q["question"], reference_for(repo, q["commit"]),
-                                          format_sources(a.retrieved), a.answer)
+        return Answered(a.answer, format_sources(a.retrieved), [c.location.split(":")[0] for c in a.citations],
+                        len(a.invalid_citations), a.cost_usd, a.retrieve_ms + a.generate_ms)
+
+    return answer
+
+
+def agent_answerer(agent, toolbox_factory, trace_dir: Path | None = None) -> Answerer:
+    """The LangGraph agent: searches and reads in a loop, then answers with verified citations."""
+    from reposcout.agent.graph import check_answer
+    from reposcout.agent.run import save_trace
+
+    def answer(q: dict) -> Answered:
+        toolbox = toolbox_factory(q.get("date"))
+        r = agent.run(q["question"], toolbox)
+        if trace_dir:
+            save_trace(r, trace_dir, q["id"])
+        reg = toolbox.registry
+        sources = reg.render_seen()  # exactly what the agent was shown, nothing more
+        unknown = [i for i in check_answer(r.answer, reg) if i.startswith("cites sources")]
+        return Answered(r.answer, sources, [c["path"] for c in r.citations], len(unknown), r.cost_usd, r.latency_ms,
+                        {"rounds": r.rounds, "tool_calls": r.tool_calls, "issues_left": len(r.issues),
+                         "stop_reason": r.stop_reason, "input_tokens": r.input_tokens})
+
+    return answer
+
+
+def run_answer_eval(questions: list[dict], repo: Path, answerer: Answerer, judge: Judge, label: str,
+                    checkpoint: Path | None = None) -> dict:
+    """Answer and grade each question. With a checkpoint file, each graded row is
+    appended as it finishes and rows already there are skipped, so a run stopped by a
+    usage limit or an error resumes where it left off."""
+    rows: list[dict] = []
+    if checkpoint and checkpoint.exists():
+        rows = [json.loads(l) for l in checkpoint.read_text(encoding="utf-8").splitlines() if l.strip()]
+    done = {r["id"] for r in rows}
+    for q in questions:
+        if q["id"] in done:
+            continue
+        a = answerer(q)
+        verdict, judge_cost = judge.grade(q["question"], reference_for(repo, q["commit"]), a.sources_text, a.answer)
         gold = set(q["gold_files"])
-        rows.append({
+        row = {
             "id": q["id"],
             "answer": a.answer,
             "correctness": verdict.correctness,
             "faithful": verdict.faithful,
             "abstained": verdict.abstained,
             "judge_reasoning": verdict.reasoning,
-            "cited_gold_file": any(c.location.split(":")[0] in gold for c in a.citations),
-            "invalid_citations": len(a.invalid_citations),
-            "latency_ms": a.retrieve_ms + a.generate_ms,
+            "cited_gold_file": any(p in gold for p in a.cited_paths),
+            "invalid_citations": a.invalid_citations,
+            "latency_ms": a.latency_ms,
             "answer_cost_usd": a.cost_usd,
             "judge_cost_usd": judge_cost,
-        })
+            **a.extra,
+        }
+        rows.append(row)
+        if checkpoint:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            with checkpoint.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+    wanted = {q["id"] for q in questions}
+    rows = [r for r in rows if r["id"] in wanted]
     n = len(rows) or 1
     lat = sorted(r["latency_ms"] for r in rows)
-    return {
-        "config": f"{cfg.label} -> {llm_model}",
+    summary = {
+        "config": label,
         "judge": judge.name,
         "n": len(rows),
         "correct (2)": sum(r["correctness"] == 2 for r in rows) / n,
@@ -237,8 +292,12 @@ def run_answer_eval(
         "p50_latency_ms": lat[len(lat) // 2] if lat else 0.0,
         "cost_per_answer_usd": sum(r["answer_cost_usd"] for r in rows) / n,
         "judge_cost_usd": sum(r["judge_cost_usd"] for r in rows),
-        "per_question": rows,
     }
+    if rows and "tool_calls" in rows[0]:
+        summary["mean_tool_calls"] = statistics.fmean(r["tool_calls"] for r in rows)
+        summary["hit_budget"] = sum(r["stop_reason"] not in ("answered", "unverified") for r in rows) / n
+        summary["unverified"] = sum(r["issues_left"] > 0 for r in rows) / n
+    return {**summary, "per_question": rows}
 
 
 def agreement(judged: list[dict], hand_labels: dict[str, int]) -> float:
