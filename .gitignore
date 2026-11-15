@@ -31,3 +31,6 @@ results/traces/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local Claude Code config
+.claude/

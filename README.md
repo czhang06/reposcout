@@ -10,6 +10,8 @@ agent that searches, reads and cites the code, with a citation-checking step and
 guardrails. On all 82 questions, the agent beats single-shot RAG on correctness and on
 finding the right file, with significance tested by paired bootstrap (results below).
 
+For a step-by-step guide to the whole pipeline (indexing, answering, evaluating, and hand-checking the evals), see [docs/WORKFLOW.md](docs/WORKFLOW.md).
+
 ## Quick start
 
 ```bash
@@ -151,6 +153,15 @@ the same hybrid index; Claude Sonnet judge through Claude Code; paired bootstrap
 
 Agent behavior: 4.1 tool calls per question on average; 2% of questions hit the tool
 budget; 12% ended with a citation issue the verify step could not get fixed.
+
+**Is the judge right?** I graded the agent's answers on a seeded random sample of 10
+questions myself, against each fix's diff, without seeing the judge's grades
+(`reposcout review`). The judge matched my grade exactly on **8 of 10** and was
+within one point on **all 10**. The two disagreements went in opposite directions
+(one higher, one lower), so there's no sign of a lenient or harsh bias. All 10
+questions passed my fairness check: answerable, not leaking the answer, and correct
+gold files. With n=10 this is a sanity check, not a precise agreement rate: the 95%
+Wilson interval for 8/10 is roughly 49–94%. Labels are in `evals/spot_check_v1.json`.
 
 What this shows:
 - **The agent finds the right code more often and answers more questions.** That

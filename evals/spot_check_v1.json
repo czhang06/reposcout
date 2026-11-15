@@ -1,0 +1,86 @@
+{
+ "v1-004": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-005": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-007": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-008": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-010": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-013": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-020": {
+  "gold_files": [],
+  "grade": 1,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-042": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-047": {
+  "gold_files": [],
+  "grade": 1,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-051": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-065": {
+  "gold_files": [],
+  "grade": 1,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ },
+ "v1-069": {
+  "gold_files": [],
+  "grade": 2,
+  "note": "",
+  "rewrite": "",
+  "verdict": "keep"
+ }
+}

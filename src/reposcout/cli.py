@@ -216,6 +216,71 @@ def eval_answers(
     typer.echo(json.dumps(summary, indent=1) + f"\nSaved {path}")
 
 
+def _latest_agent_answers(results: Path) -> Path:
+    import json
+
+    runs = sorted(results.glob("answers-*.json"), reverse=True)
+    for p in runs:
+        meta = json.loads(p.read_text(encoding="utf-8")).get("meta", {})
+        if meta.get("mode") == "agent":
+            return p
+    raise typer.BadParameter(f"no agent answer run in {results}; run `reposcout eval-answers` first")
+
+
+def _review_items(dataset: Path, answers: Path | None, repo: Path, n: int, seed: int) -> list[dict]:
+    """Build the sample once and cache it, so the page shows the same questions every time."""
+    import json
+
+    from reposcout.evals.review import build_sample
+
+    answers = answers or _latest_agent_answers(Path("results"))
+    cache = Path("data/review") / f"sample-{dataset.stem}-n{n}-seed{seed}-{answers.stem}.json"
+    if cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8"))
+    items = build_sample(dataset, answers, repo, n, seed)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(items, indent=1), encoding="utf-8")
+    return items
+
+
+@app.command()
+def review(
+    repo: Path = typer.Option(Path("data/airflow"), exists=True, file_okay=False),
+    dataset: Path = typer.Option(Path("evals/airflow_v1.jsonl"), exists=True),
+    answers: Path = typer.Option(None, help="answers-*.json to grade (default: latest agent run)"),
+    labels: Path = typer.Option(Path("evals/spot_check_v1.json"), help="Where your labels are saved"),
+    n: int = typer.Option(20),
+    seed: int = typer.Option(7),
+    port: int = typer.Option(8765),
+):
+    """Hand-check a random sample of eval questions and grade the agent's answers in a browser."""
+    import uvicorn
+
+    from reposcout.evals.review import LabelStore, create_app
+
+    items = _review_items(dataset, answers, repo, n, seed)
+    typer.echo(f"Reviewing {len(items)} questions; labels save to {labels}. Open http://127.0.0.1:{port}")
+    uvicorn.run(create_app(items, LabelStore(labels)), host="127.0.0.1", port=port, log_level="warning")
+
+
+@app.command("review-summary")
+def review_summary(
+    repo: Path = typer.Option(Path("data/airflow"), exists=True, file_okay=False),
+    dataset: Path = typer.Option(Path("evals/airflow_v1.jsonl"), exists=True),
+    answers: Path = typer.Option(None),
+    labels: Path = typer.Option(Path("evals/spot_check_v1.json"), exists=True),
+    n: int = typer.Option(20),
+    seed: int = typer.Option(7),
+):
+    """Your verdicts on the sample and how often the LLM judge agreed with your grades."""
+    import json
+
+    from reposcout.evals.review import LabelStore, summarize
+
+    items = _review_items(dataset, answers, repo, n, seed)
+    typer.echo(json.dumps(summarize(items, LabelStore(labels).labels), indent=1))
+
+
 @app.command("compare-answers")
 def compare_answers(
     baseline: Path = typer.Argument(..., exists=True, help="answers-*.json for the baseline (e.g. rag)"),

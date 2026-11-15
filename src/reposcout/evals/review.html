@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eval Spot-Check</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+    --accent: #2f5bd3; --accent-soft: #e8eefc; --add: #e6f4ea; --add-text: #1e6b34;
+    --del: #fbe9e7; --del-text: #9c2b1c; --hunk: #6b6b66; --code: #f2f1ed;
+    --keep: #1e7b45; --reword: #9a6a00; --fix: #2f5bd3; --drop: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9b9a94; --line: #34332f;
+      --accent: #8aa8ff; --accent-soft: #24304f; --add: #173322; --add-text: #8fd6a6;
+      --del: #3a1d1a; --del-text: #f2a499; --hunk: #9b9a94; --code: #262624;
+      --keep: #6fcf97; --reword: #e2b84a; --fix: #8aa8ff; --drop: #f28b82;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+  nav { border-right: 1px solid var(--line); padding: 16px 10px; position: sticky; top: 0;
+        height: 100vh; overflow-y: auto; background: var(--panel); }
+  nav h1 { font-size: 14px; margin: 0 6px 4px; }
+  nav .progress { font-size: 12px; color: var(--muted); margin: 0 6px 12px; }
+  nav button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+               background: none; border: 0; color: var(--text); padding: 6px; border-radius: 6px;
+               font: inherit; font-size: 13px; cursor: pointer; }
+  nav button:hover { background: var(--code); }
+  nav button.active { background: var(--accent-soft); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--muted); flex: none; }
+  .dot.keep { background: var(--keep); border-color: var(--keep); }
+  .dot.reword { background: var(--reword); border-color: var(--reword); }
+  .dot.fix_gold { background: var(--fix); border-color: var(--fix); }
+  .dot.drop { background: var(--drop); border-color: var(--drop); }
+  .g { margin-left: auto; font-size: 11px; color: var(--muted); }
+  main { padding: 24px 32px 80px; max-width: 980px; }
+  .qid { color: var(--muted); font-size: 13px; }
+  h2 { font-size: 22px; line-height: 1.35; margin: 4px 0 14px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .meta a { color: var(--accent); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 14px 16px; margin-bottom: 14px; }
+  section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+               color: var(--muted); margin: 0 0 8px; }
+  .hint { font-size: 13px; color: var(--muted); margin: -2px 0 10px; }
+  code, pre { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
+  .files code { background: var(--code); padding: 1px 6px; border-radius: 4px; display: inline-block; margin: 2px 4px 2px 0; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  pre.diff { max-height: 460px; overflow: auto; background: var(--code); border-radius: 6px; padding: 8px 0; }
+  pre.diff span { display: block; padding: 0 10px; }
+  pre.diff .add { background: var(--add); color: var(--add-text); }
+  pre.diff .del { background: var(--del); color: var(--del-text); }
+  pre.diff .hunk { color: var(--hunk); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 6px 0; }
+  .answer { white-space: pre-wrap; font-size: 14px; }
+  .choices { display: flex; flex-wrap: wrap; gap: 8px; }
+  .choice { border: 1.5px solid var(--line); background: var(--panel); color: var(--text);
+            border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 14px; cursor: pointer; text-align: left; }
+  .choice small { display: block; color: var(--muted); font-size: 12px; }
+  .choice kbd { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-right: 6px; }
+  .choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  textarea, input[type=text] { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                               border-radius: 6px; padding: 8px; font: inherit; font-size: 14px; margin-top: 8px; }
+  textarea { min-height: 60px; resize: vertical; }
+  .extra { display: none; }
+  .extra.show { display: block; }
+  .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; }
+  .bar button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+                background: var(--panel); color: var(--text); cursor: pointer; }
+  .status { font-size: 13px; color: var(--muted); }
+  .summary pre { background: var(--code); border-radius: 6px; padding: 10px; }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    nav { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    main { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav>
+    <h1>Eval spot-check</h1>
+    <div class="progress" id="progress"></div>
+    <div id="list"></div>
+    <div class="progress" style="margin-top:14px">Keys: 1–4 verdict, q/w/e grade 0/1/2, j/k next/prev</div>
+  </nav>
+  <main id="main"><p>Loading…</p></main>
+</div>
+<script>
+const state = { items: [], labels: {}, i: 0 };
+const VERDICTS = [
+  ["keep", "Keep", "Fair, answerable, gold files right"],
+  ["reword", "Reword", "Leaks the answer, unclear, or not how a dev would ask"],
+  ["fix_gold", "Fix gold files", "A gold file is incidental, or one is missing"],
+  ["drop", "Drop", "Not answerable from the indexed code"],
+];
+const GRADES = [[0, "0 — wrong / no answer"], [1, "1 — partly right"], [2, "2 — matches the fix"]];
+
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const k of kids) n.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return n;
+};
+const label = id => state.labels[id] || { verdict: null, grade: null, note: "", rewrite: "", gold_files: [] };
+
+let saveTimer = null;
+function save(id) {
+  clearTimeout(saveTimer);
+  document.getElementById("status").textContent = "Saving…";
+  saveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`/api/labels/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+                                                   body: JSON.stringify(label(id)) });
+      if (!r.ok) throw new Error(await r.text());
+      document.getElementById("status").textContent = "Saved";
+    } catch (e) {
+      document.getElementById("status").textContent = "Not saved: " + e.message;
+    }
+  }, 300);
+}
+function update(id, patch) {
+  state.labels[id] = { ...label(id), ...patch };
+  save(id);
+  renderNav();
+}
+
+function renderNav() {
+  const list = document.getElementById("list");
+  list.replaceChildren(...state.items.map((it, idx) => {
+    const l = label(it.id);
+    return el("button", { class: idx === state.i ? "active" : "", onclick: () => go(idx) },
+      el("span", { class: "dot " + (l.verdict || "") }), it.id,
+      el("span", { class: "g" }, l.grade === null || l.grade === undefined ? "" : "graded"));
+  }));
+  const reviewed = state.items.filter(it => label(it.id).verdict).length;
+  const graded = state.items.filter(it => label(it.id).grade !== null && label(it.id).grade !== undefined).length;
+  document.getElementById("progress").textContent =
+    `${reviewed}/${state.items.length} reviewed · ${graded}/${state.items.length} graded`;
+}
+
+function diffBlock(text) {
+  const pre = el("pre", { class: "diff" });
+  for (const line of text.split("\n")) {
+    const cls = line.startsWith("+") && !line.startsWith("+++") ? "add"
+              : line.startsWith("-") && !line.startsWith("---") ? "del"
+              : line.startsWith("@@") || line.startsWith("diff ") ? "hunk" : "";
+    pre.append(el("span", { class: cls }, line || " "));
+  }
+  return pre;
+}
+
+function render() {
+  const it = state.items[state.i];
+  const l = label(it.id);
+  const main = document.getElementById("main");
+  const verdictBtns = VERDICTS.map(([v, name, help], k) =>
+    el("button", { class: "choice", "aria-pressed": String(l.verdict === v),
+                   onclick: () => { update(it.id, { verdict: v }); render(); } },
+       el("kbd", {}, k + 1), name, el("small", {}, help)));
+  const gradeBtns = GRADES.map(([g, name], k) =>
+    el("button", { class: "choice", "aria-pressed": String(l.grade === g),
+                   onclick: () => { update(it.id, { grade: g }); render(); } },
+       el("kbd", {}, "qwe"[k]), name));
+
+  const rewrite = el("input", { type: "text", placeholder: "Reworded question", value: l.rewrite || "" });
+  rewrite.addEventListener("input", e => update(it.id, { rewrite: e.target.value }));
+  const gold = el("textarea", { placeholder: "Correct gold files, one per line" });
+  gold.value = (l.gold_files && l.gold_files.length ? l.gold_files : it.gold_files).join("\n");
+  gold.addEventListener("input", e => update(it.id, { gold_files: e.target.value.split("\n").map(s => s.trim()).filter(Boolean) }));
+  const note = el("textarea", { placeholder: "Why? (a few words)" });
+  note.value = l.note || "";
+  note.addEventListener("input", e => update(it.id, { note: e.target.value }));
+
+  const prLink = it.pr ? el("a", { href: `https://github.com/apache/airflow/pull/${it.pr}`, target: "_blank", rel: "noopener" }, `PR #${it.pr}`) : "";
+  main.replaceChildren(
+    el("div", { class: "qid" }, `${it.id} · ${state.i + 1} of ${state.items.length}`),
+    el("h2", {}, it.question),
+    el("div", { class: "meta" }, el("span", {}, "Fix: " + it.title), prLink, el("span", {}, "Merged " + it.date)),
+    el("section", {},
+      el("h3", {}, "1. Is the question fair?"),
+      el("p", { class: "hint" }, "Answerable from the code? Doesn't leak the file or the fix? Gold files really part of the fix?"),
+      el("div", { class: "choices" }, ...verdictBtns),
+      el("div", { class: "extra" + (l.verdict === "reword" ? " show" : "") }, rewrite),
+      el("div", { class: "extra" + (l.verdict === "fix_gold" ? " show" : "") }, gold),
+      note),
+    el("section", { class: "files" }, el("h3", {}, "Gold files (from the fix's diff)"),
+      ...it.gold_files.map(f => el("code", {}, f)),
+      el("details", {}, el("summary", {}, "All files the commit changed"), el("pre", {}, it.stat)),
+      it.body ? el("details", {}, el("summary", {}, "Commit message"), el("pre", {}, it.body)) : ""),
+    el("section", {}, el("h3", {}, "The fix (diff of the gold files)"), diffBlock(it.diff)),
+    el("section", {},
+      el("h3", {}, "2. Grade the agent's answer"),
+      el("p", { class: "hint" }, "Against the fix above. The LLM judge's grade is hidden so it can't sway you."),
+      el("pre", { class: "answer" }, it.agent_answer || "(no answer)"),
+      el("div", { class: "choices", style: "margin-top:12px" }, ...gradeBtns)),
+    el("div", { class: "bar" },
+      el("button", { onclick: () => go(state.i - 1) }, "← Previous"),
+      el("span", { class: "status", id: "status" }, ""),
+      state.i === state.items.length - 1
+        ? el("button", { onclick: showSummary }, "Finish: show judge agreement")
+        : el("button", { onclick: () => go(state.i + 1) }, "Next →")),
+  );
+  window.scrollTo(0, 0);
+}
+
+function go(idx) {
+  if (idx < 0 || idx >= state.items.length) return;
+  state.i = idx;
+  try { localStorage.setItem("spotcheck.i", String(idx)); } catch {}
+  renderNav(); render();
+}
+
+async function showSummary() {
+  const s = await (await fetch("/api/summary")).json();
+  document.getElementById("main").replaceChildren(
+    el("h2", {}, "Summary"),
+    el("section", { class: "summary" },
+      el("p", {}, `Reviewed ${s.reviewed}/${s.sampled}. Verdicts: keep ${s.verdicts.keep}, reword ${s.verdicts.reword}, fix gold ${s.verdicts.fix_gold}, drop ${s.verdicts.drop}.`),
+      el("p", {}, `Judge agreement on your grades: ${s.judge_exact_agreement} exact, ${s.judge_within_one} within one point.`),
+      el("pre", {}, JSON.stringify({ changes: s.changes, disagreements: s.disagreements }, null, 1))),
+    el("div", { class: "bar" }, el("button", { onclick: () => go(state.items.length - 1) }, "← Back to questions"), el("span"), el("span")));
+}
+
+document.addEventListener("keydown", e => {
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) || !state.items.length) return;
+  const it = state.items[state.i];
+  if ("1234".includes(e.key) && e.key !== "") { update(it.id, { verdict: VERDICTS[+e.key - 1][0] }); render(); }
+  else if ("qwe".includes(e.key) && e.key !== "") { update(it.id, { grade: "qwe".indexOf(e.key) }); render(); }
+  else if (e.key === "j") go(state.i + 1);
+  else if (e.key === "k") go(state.i - 1);
+});
+
+(async () => {
+  const data = await (await fetch("/api/items")).json();
+  state.items = data.items; state.labels = data.labels;
+  let saved = 0;
+  try { saved = +localStorage.getItem("spotcheck.i") || 0; } catch {}
+  state.i = Math.min(saved, state.items.length - 1);
+  renderNav(); render();
+})();
+</script>
+</body>
+</html>
